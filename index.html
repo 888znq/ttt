@@ -122,9 +122,54 @@
     flex-direction:column;gap:12px;pointer-events:none;
   }
   #overlay-msg{
-    font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--muted);
-    text-align:center;line-height:1.7;
-  }
+      font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--muted);
+      text-align:center;line-height:1.7;
+    }
+  
+    /* ── LOG PANEL ── */
+    #log-panel{
+      position:fixed;bottom:0;left:0;right:0;
+      height:160px;background:#0a0a0c;border-top:1px solid var(--border2);
+      display:flex;flex-direction:column;z-index:100;
+      font-family:'JetBrains Mono',monospace;font-size:10px;
+    }
+    #log-toolbar{
+      display:flex;align-items:center;gap:8px;padding:3px 10px;
+      background:#111114;border-bottom:1px solid var(--border);flex-shrink:0;
+    }
+    #log-toolbar span{color:var(--muted);font-size:10px;flex:1;}
+    #log-clear{
+      font-size:10px;color:var(--muted);background:none;border:none;
+      cursor:pointer;padding:2px 6px;border-radius:3px;
+    }
+    #log-clear:hover{color:var(--text);}
+    #log-close{
+      font-size:10px;color:var(--muted);background:none;border:none;
+      cursor:pointer;padding:2px 6px;border-radius:3px;
+    }
+    #log-close:hover{color:var(--red);}
+    #log-body{
+      flex:1;overflow-y:auto;padding:4px 10px;
+    }
+    .log-line{
+      line-height:1.6;white-space:pre;border-bottom:1px solid rgba(255,255,255,0.03);
+    }
+    .log-info{color:#6b7fa8;}
+    .log-ok{color:var(--green);}
+    .log-warn{color:#f59e0b;}
+    .log-err{color:var(--red);}
+    .log-tick{color:#2dd4bf;}
+  
+    #log-toggle{
+      position:fixed;bottom:8px;right:16px;z-index:101;
+      font-family:'JetBrains Mono',monospace;font-size:10px;
+      background:#1a1a22;border:1px solid var(--border2);
+      color:var(--muted);padding:3px 10px;border-radius:5px;cursor:pointer;
+    }
+    #log-toggle:hover{color:var(--text);}
+  
+    /* shrink chart area when log is open */
+    body.log-open #app{ padding-bottom:160px; }
 </style>
 </head>
 <body>
@@ -132,14 +177,14 @@
 
   <header>
     <div class="logo">OHLC<span>28</span> <span style="font-size:10px;color:var(--muted);font-weight:400;">LIVE</span></div>
-    <div class="session-badge">Session <b>10:30 – 22:30</b> · Normalized from open</div>
+    <div class="session-badge">Session <b>05:30 – 05:30 IST</b> · Normalized from open</div>
     <div id="live-status">
       <div id="live-dot" class="connecting"></div>
       <span id="live-label">Connecting…</span>
     </div>
     <div class="tf-group">
       <label>Timeframe (sec):</label>
-      <input id="tf-input" class="tf-input" type="number" value="300" min="10"/>
+      <input id="tf-input" class="tf-input" type="number" value="1" min="1"/>
       <button class="btn-apply" id="btn-apply" disabled>Apply</button>
     </div>
   </header>
@@ -162,7 +207,64 @@
 
 </div>
 
+<!-- LOG PANEL -->
+<div id="log-panel" style="display:flex;">
+  <div id="log-toolbar">
+    <span id="log-title">Debug Log</span>
+    <button id="log-clear">Clear</button>
+    <button id="log-close">✕</button>
+  </div>
+  <div id="log-body"></div>
+</div>
+<button id="log-toggle" style="position:fixed;bottom:170px;right:16px;z-index:200;">LOG</button>
+
 <script>
+/* ── INDEXEDDB CACHE ─────────────────────────────────────── */
+var DB_NAME    = 'ohlc28';
+var DB_VERSION = 1;
+var DB_STORE   = 'tickCache';
+var idb        = null;
+
+function openIDB(cb){
+  if(idb){ cb(idb); return; }
+  var req = indexedDB.open(DB_NAME, DB_VERSION);
+  req.onupgradeneeded = function(e){
+    var db = e.target.result;
+    if(!db.objectStoreNames.contains(DB_STORE)){
+      db.createObjectStore(DB_STORE);
+    }
+  };
+  req.onsuccess = function(e){ idb = e.target.result; cb(idb); };
+  req.onerror   = function(){ cb(null); };
+}
+
+/* key: "symbol|tfSec|dateStr"  e.g. "frxEURUSD|1|2026-06-25" */
+function cacheKey(symbol, tf, epochStart){
+  var d = new Date(epochStart * 1000);
+  var ds = d.getUTCFullYear()+'-'+
+           String(d.getUTCMonth()+1).padStart(2,'0')+'-'+
+           String(d.getUTCDate()).padStart(2,'0');
+  return symbol+'|'+tf+'|'+ds;
+}
+
+function idbGet(key, cb){
+  openIDB(function(db){
+    if(!db){ cb(null); return; }
+    var tx  = db.transaction(DB_STORE,'readonly');
+    var req = tx.objectStore(DB_STORE).get(key);
+    req.onsuccess = function(){ cb(req.result || null); };
+    req.onerror   = function(){ cb(null); };
+  });
+}
+
+function idbPut(key, value){
+  openIDB(function(db){
+    if(!db) return;
+    var tx = db.transaction(DB_STORE,'readwrite');
+    tx.objectStore(DB_STORE).put(value, key);
+  });
+}
+
 /* ── CONFIG ──────────────────────────────────────────────── */
 const DERIV_APP_ID   = "33wuhc3RztQ6f2rwZijoR";
 const DERIV_API_TOKEN= "pat_be522f00d2ce902b2f5c78b72613e09520238db0014036753715951970969f91";
@@ -199,12 +301,12 @@ const COLORS = [
 ];
 
 /* ── SESSION ─────────────────────────────────────────────── */
-const SESSION_START  = 10*3600 + 30*60;  // 10:30 UTC
-const SESSION_END    = 22*3600 + 30*60;  // 22:30 UTC
+const SESSION_START  = 0*3600 + 0*60;    // 00:00 UTC = 05:30 IST
+const SESSION_END    = 24*3600 + 0*60;   // 24:00 UTC = 05:30 IST next day
 const SESSION_RANGE  = SESSION_END - SESSION_START;
 
 /* ── STATE ───────────────────────────────────────────────── */
-var tfSec       = 300;
+var tfSec       = 1;
 var allData     = [];          // [{pair, color, bars:[{t,o,h,l,c}]}]
 var visible     = new Set(PAIRS);
 var hoveredPair = null;
@@ -215,17 +317,58 @@ var mouseCanvasX= -1, mouseCanvasY = -1;
 var loadedCount = 0;
 var totalCount  = PAIRS.length;
 
-/* ── WEBSOCKET QUEUE ─────────────────────────────────────── */
-var ws            = null;
-var reqQueue      = [];   // [{pair, symbol, granularity}]
-var activeReq     = null;
-var pairDataMap   = {};   // symbol -> raw bars
-var reqIdMap      = {};   // req_id -> pair
+/* ── WEBSOCKET WORKERS ───────────────────────────────────── */
+var NUM_WORKERS   = 4;
+var workers       = [];   // [{ws, activeReq}]
+var reqQueue      = [];
+var pairDataMap   = {};
+var reqIdMap      = {};   // req_id -> workerIndex
 
 var REQ_ID_BASE   = 1000;
 var nextReqId     = REQ_ID_BASE;
 
+// tick-chunk progress per pair index
+var chunkProgress = {};   // pairIndex -> {got, est}
+
 function getReqId(){ return nextReqId++; }
+
+/* ── LOG ─────────────────────────────────────────────────── */
+var LOG_MAX = 300;
+function ulog(msg, cls){
+  var body = document.getElementById('log-body');
+  if(!body) return;
+  var d = new Date();
+  var ts = String(d.getUTCHours()).padStart(2,'0')+':'+
+           String(d.getUTCMinutes()).padStart(2,'0')+':'+
+           String(d.getUTCSeconds()).padStart(2,'0')+'.'+
+           String(d.getUTCMilliseconds()).padStart(3,'0');
+  var line = document.createElement('div');
+  line.className = 'log-line ' + (cls||'log-info');
+  line.textContent = '['+ts+'] '+msg;
+  body.appendChild(line);
+  while(body.children.length > LOG_MAX){ body.removeChild(body.firstChild); }
+  body.scrollTop = body.scrollHeight;
+  /* also update title counter */
+  document.getElementById('log-title').textContent =
+    'Debug Log ('+body.children.length+')';
+}
+
+document.getElementById('log-toggle').addEventListener('click', function(){
+  var panel = document.getElementById('log-panel');
+  var open  = panel.style.display !== 'none';
+  panel.style.display = open ? 'none' : 'flex';
+  document.body.classList.toggle('log-open', !open);
+  document.getElementById('log-toggle').style.bottom = open ? '8px' : '170px';
+});
+document.body.classList.add('log-open');
+document.getElementById('log-clear').addEventListener('click', function(){
+  document.getElementById('log-body').innerHTML = '';
+  document.getElementById('log-title').textContent = 'Debug Log (0)';
+});
+document.getElementById('log-close').addEventListener('click', function(){
+  document.getElementById('log-panel').style.display = 'none';
+  document.body.classList.remove('log-open');
+});
 
 /* ── UI HELPERS ──────────────────────────────────────────── */
 function setLiveStatus(state, label){
@@ -253,136 +396,291 @@ function setOverlay(msg){
 
 var TICK_CHUNK_SIZE = 3500;
 
-function fetchNextTickChunk(){
+/* estimated total ticks for a 12h session at ~1 tick/sec average */
+var EST_TOTAL_TICKS = SESSION_RANGE;  // 43200
+
+function updateTickProgress(pairIdx, totalSoFar){
+  chunkProgress[pairIdx] = totalSoFar;
+  renderTickProgress();
+}
+
+function clearTickProgress(){
+  chunkProgress = {};
+  renderTickProgress();
+}
+
+function renderTickProgress(){
+  if(tfSec >= 60){ return; }
+  var bar = document.getElementById('progress-bar');
+  var wrap = document.getElementById('progress-wrap');
+  // During tick mode: blend pair completion + per-active-pair chunk fraction
+  var pairsDone = loadedCount;
+  var chunkFraction = 0;
+  var activeCount = 0;
+  workers.forEach(function(w){
+    if(w.activeReq && w.activeReq._chunking){
+      activeCount++;
+      var idx = PAIRS.indexOf(w.activeReq.pair);
+      var got = chunkProgress[idx] || 0;
+      chunkFraction += Math.min(1, got / EST_TOTAL_TICKS);
+    }
+  });
+  var total = pairsDone + (activeCount > 0 ? chunkFraction / activeCount : 0);
+  var pct = Math.min(100, Math.round(total / totalCount * 100));
+  wrap.style.display = 'block';
+  bar.style.width = pct + '%';
+  if(pairsDone >= totalCount){ setTimeout(function(){ wrap.style.display='none'; }, 600); }
+}
+
+/* ── WORKER FACTORY ──────────────────────────────────────── */
+function createWorker(wIdx){
+  var w = { ws: null, activeReq: null };
+  workers[wIdx] = w;
+
+  function openConn(){
+    w.ws = new WebSocket(DERIV_WS_URL);
+
+    w.ws.onopen = function(){
+          ulog('Worker '+wIdx+' connected', 'log-ok');
+          workerFetchNext(wIdx);
+        };
+
+    w.ws.onmessage = function(evt){
+      var msg = JSON.parse(evt.data);
+      if(msg.msg_type !== 'history' && msg.msg_type !== 'candles') return;
+
+      if(msg.error){
+              ulog('W'+wIdx+' ERR '+msg.error.code+' '+msg.error.message+' ('+( w.activeReq && w.activeReq.pair)+')', 'log-err');
+              console.warn('worker'+wIdx+' error:', msg.error.message, w.activeReq && w.activeReq.pair);
+              workerAdvance(wIdx);
+              return;
+            }
+      var req = w.activeReq;
+      if(!req){ workerAdvance(wIdx); return; }
+
+      /* ── CHUNKED TICK PATH ── */
+      if(req._chunking && msg.msg_type === 'history'){
+        var epochs = (msg.history && msg.history.times)  || [];
+        var prices = (msg.history && msg.history.prices) || [];
+        var chunk  = [];
+        for(var ti = 0; ti < epochs.length; ti++){
+          chunk.push({ epoch: +epochs[ti], quote: +prices[ti] });
+        }
+        chunk.reverse();
+        req._tickChunks = chunk.concat(req._tickChunks);
+
+        var pIdx = PAIRS.indexOf(req.pair);
+        updateTickProgress(pIdx, req._tickChunks.length);
+
+        var gotCount    = epochs.length;
+        var oldestEpoch = chunk.length ? chunk[0].epoch : req._chunkStart;
+
+        ulog('W'+wIdx+' '+req.pair+' chunk +'+gotCount+' total='+req._tickChunks.length+' oldest='+new Date(oldestEpoch*1000).toISOString().substr(11,8), 'log-info');
+                if(gotCount >= TICK_CHUNK_SIZE && oldestEpoch > req._chunkStart + 5){
+                  req._chunkEnd = oldestEpoch - 1;
+                  setTimeout(function(){ workerSendTickChunk(wIdx); }, 120);
+                  return;
+                }
+
+        var allTicks = req._tickChunks;
+        allTicks.sort(function(a,b){ return a.epoch - b.epoch; });
+        var candles = buildOHLCFromTicks(allTicks, tfSec);
+        finaliseCandles(req.pair, candles, false);
+                workerAdvance(wIdx);
+                return;
+              }
+        
+              /* ── STANDARD CANDLE PATH ── */
+              finaliseCandles(req.pair, msg.candles || [], false);
+              workerAdvance(wIdx);
+    };
+
+    w.ws.onerror = function(){
+          ulog('Worker '+wIdx+' socket error', 'log-err');
+          if(loadedCount < totalCount) setLiveStatus('error','Worker '+wIdx+' error');
+        };
+    
+        w.ws.onclose = function(){
+          ulog('Worker '+wIdx+' closed (loaded='+loadedCount+'/'+totalCount+')', 'log-warn');
+          if(loadedCount < totalCount){
+            setTimeout(function(){ openConn(); }, 1000);
+          }
+        };
+  }
+
+  openConn();
+}
+
+function workerSendTickChunk(wIdx){
+  var w   = workers[wIdx];
+  var req = w.activeReq;
   var rid = getReqId();
-  reqIdMap[rid] = activeReq.pair;
-  ws.send(JSON.stringify({
-    ticks_history: activeReq.symbol,
+  w.ws.send(JSON.stringify({
+    ticks_history: req.symbol,
     style: 'ticks',
-    start: activeReq._chunkStart,
-    end: activeReq._chunkEnd,
+    start: req._chunkStart,
+    end: req._chunkEnd,
     count: TICK_CHUNK_SIZE,
     req_id: rid
   }));
 }
 
-/* ── WEBSOCKET ───────────────────────────────────────────── */
-function openWS(){
-  setLiveStatus('connecting','Connecting…');
-  ws = new WebSocket(DERIV_WS_URL);
+function workerFetchNext(wIdx){
+  var w = workers[wIdx];
+  if(!reqQueue.length){ w.activeReq = null; return; }
+  var req = reqQueue.shift();
+  w.activeReq = req;
 
-  ws.onopen = function(){
-    // Skip authorize — ticks_history is public, no token needed
-    setLiveStatus('connecting','Fetching data…');
-    setOverlay('Fetching candle data… (0/' + totalCount + ')');
-    setProgress(0, totalCount);
-    fetchNext();
-  };
+  var now           = Math.floor(Date.now()/1000);
+  var todayMidnight = now - (now % 86400);
+  var todayStart    = todayMidnight + SESSION_START;
+  var todayEnd      = todayMidnight + SESSION_END;
+  var startEpoch, endEpoch;
+    startEpoch = todayMidnight + SESSION_START;  // 00:00 UTC today
+    endEpoch   = Math.min(now, todayMidnight + 86400 - 1);  // up to 23:59:59 UTC today
 
-  ws.onmessage = function(evt){
-      var msg = JSON.parse(evt.data);
-  
-      if(msg.msg_type === 'history' || msg.msg_type === 'candles'){
-        if(msg.error){
-          console.warn('data error:', msg.error.message, activeReq);
-          advanceQueue();
-          return;
-        }
-        var pair = activeReq ? activeReq.pair : null;
-        if(!pair){ advanceQueue(); return; }
-  
-        /* ── CHUNKED TICK PATH ── */
-        if(activeReq._chunking && msg.msg_type === 'history'){
-          var epochs = (msg.history && msg.history.times)  || [];
-          var prices = (msg.history && msg.history.prices) || [];
-          var chunk  = [];
-          for(var ti = 0; ti < epochs.length; ti++){
-            chunk.push({ epoch: +epochs[ti], quote: +prices[ti] });
-          }
-          // Prepend: API returns newest-first when using count, so reverse
-          chunk.reverse();
-          activeReq._tickChunks = chunk.concat(activeReq._tickChunks);
-  
-          var gotCount = epochs.length;
-          var oldestEpoch = chunk.length ? chunk[0].epoch : activeReq._chunkStart;
-  
-          // If we got a full chunk and haven't reached the session start, fetch earlier
-          if(gotCount >= TICK_CHUNK_SIZE && oldestEpoch > activeReq._chunkStart + 5){
-            activeReq._chunkEnd = oldestEpoch - 1;
-            setTimeout(fetchNextTickChunk, 120);
-            return;  // keep activeReq, keep waiting
-          }
-  
-          // Done chunking — build OHLC from all accumulated ticks
-          var allTicks = activeReq._tickChunks;
-          allTicks.sort(function(a,b){ return a.epoch - b.epoch; });
-          var candles = buildOHLCFromTicks(allTicks, tfSec);
-          finaliseCandles(pair, candles);
-          return;
-        }
-  
-        /* ── STANDARD CANDLE PATH ── */
-        var candles = msg.candles || [];
-        finaliseCandles(pair, candles);
+  req._startEpoch = startEpoch;
+  req._endEpoch   = endEpoch;
+
+  /* ── try cache first ── */
+    var ck = cacheKey(req.symbol, tfSec, startEpoch);
+    ulog('W'+wIdx+' fetch '+req.pair+' start='+new Date(startEpoch*1000).toISOString().substr(0,19)+'Z', 'log-info');
+    idbGet(ck, function(cached){
+      if(cached){
+        ulog('W'+wIdx+' '+req.pair+' CACHE HIT ('+cached.length+' bars)', 'log-ok');
+        finaliseCandles(req.pair, cached, true);
+        workerAdvance(wIdx);
+        return;
       }
-    };
-  
-    function finaliseCandles(pair, candles){
-      // Filter to session window
-      var sessionBars = [];
-      candles.forEach(function(c){
-        var tLocal = c.epoch % 86400;
-        if(tLocal >= SESSION_START && tLocal < SESSION_END){
-          sessionBars.push({ t: tLocal, o: +c.open, h: +c.high, l: +c.low, c: +c.close });
-        }
-      });
-  
-      sessionBars.sort(function(a,b){ return a.t - b.t; });
-  
-      var normalised = [];
-      if(sessionBars.length > 0){
-        var base = sessionBars[0].o;
-        if(base !== 0){
-          normalised = sessionBars.map(function(b){
-            return {
-              t: b.t,
-              o: (b.o/base - 1)*100,
-              h: (b.h/base - 1)*100,
-              l: (b.l/base - 1)*100,
-              c: (b.c/base - 1)*100
-            };
-          });
-        }
-      }
-  
-      var idx = PAIRS.indexOf(pair);
-      allData[idx] = { pair: pair, color: COLORS[idx], bars: normalised };
-  
-      loadedCount++;
-      setProgress(loadedCount, totalCount);
-      setOverlay(loadedCount < totalCount
-        ? 'Fetching candle data… (' + loadedCount + '/' + totalCount + ')'
-        : null);
-      if(loadedCount >= totalCount){
-        setLiveStatus('live','Live');
-        document.getElementById('btn-apply').disabled = false;
-      }
-      updateStats();
-      draw();
-      advanceQueue();
-    }
-
-  ws.onerror = function(){
-    setLiveStatus('error','Connection error');
-    setOverlay('WebSocket error. Please refresh.');
-  };
-
-  ws.onclose = function(){
-    if(loadedCount < totalCount){
-      setLiveStatus('error','Disconnected');
-    }
-  };
+      ulog('W'+wIdx+' '+req.pair+' cache miss — fetching network', 'log-warn');
+      workerSendRequest(wIdx, startEpoch, endEpoch);
+    });
 }
+
+function workerSendRequest(wIdx, startEpoch, endEpoch){
+  var w   = workers[wIdx];
+  var req = w.activeReq;
+  var rid = getReqId();
+  if(tfSec < 60){
+    req._tickChunks = [];
+    req._chunkStart = startEpoch;
+    req._chunkEnd   = endEpoch;
+    req._chunking   = true;
+    w.ws.send(JSON.stringify({
+      ticks_history: req.symbol,
+      style: 'ticks',
+      start: req._chunkStart,
+      end: req._chunkEnd,
+      count: TICK_CHUNK_SIZE,
+      req_id: rid
+    }));
+  } else {
+    w.ws.send(JSON.stringify({
+      ticks_history: req.symbol,
+      style: 'candles',
+      granularity: tfSec,
+      start: startEpoch,
+      end: endEpoch,
+      req_id: rid
+    }));
+  }
+}
+
+function workerAdvance(wIdx){
+  setTimeout(function(){ workerFetchNext(wIdx); }, 80);
+}
+
+function advanceQueue(){ setTimeout(function(){}, 120); }
+
+function finaliseCandles(pair, candles, fromCache){
+  var normalised = [];
+
+  if(fromCache){
+    normalised = candles;
+  } else {
+    var sessionBars = [];
+    candles.forEach(function(c){
+      var tLocal = c.epoch % 86400;
+      if(tLocal >= SESSION_START && tLocal < SESSION_END){
+        sessionBars.push({ t: tLocal, o: +c.open, h: +c.high, l: +c.low, c: +c.close });
+      }
+    });
+    sessionBars.sort(function(a,b){ return a.t - b.t; });
+
+    if(sessionBars.length > 0){
+          var base = sessionBars[0].o;
+          if(base !== 0){
+            normalised = sessionBars.map(function(b){
+              return {
+                t: b.t,
+                o: (b.o/base - 1)*100,
+                h: (b.h/base - 1)*100,
+                l: (b.l/base - 1)*100,
+                c: (b.c/base - 1)*100
+              };
+            });
+            normalised._rawOpen = base;
+          }
+        }
+
+    if(normalised.length > 0){
+      var now2          = Math.floor(Date.now()/1000);
+      var todayMidnight = now2 - (now2 % 86400);
+      var todayStart2   = todayMidnight + SESSION_START;
+      var reqForPair    = null;
+      workers.forEach(function(w){ if(w.activeReq && w.activeReq.pair === pair) reqForPair = w.activeReq; });
+      var se = reqForPair ? reqForPair._startEpoch : 0;
+      if(se > 0 && se < todayStart2){
+        idbPut(cacheKey(DERIV_SYMBOL[pair], tfSec, se), normalised);
+      }
+    }
+  }
+
+  var idx = PAIRS.indexOf(pair);
+    var prevData = allData[idx];
+    /* seed _rawOpen and _bk on last normalised bar */
+    if(normalised.length > 0 && normalised._rawOpen){
+      var lb  = normalised[normalised.length - 1];
+      var ro  = normalised._rawOpen;
+      var nowEp2      = Math.floor(Date.now() / 1000);
+      var dayMid2     = nowEp2 - (nowEp2 % 86400);
+      lb._rawH = ro * (1 + lb.h / 100);
+      lb._rawL = ro * (1 + lb.l / 100);
+      lb._rawC = ro * (1 + lb.c / 100);
+      lb._bk   = Math.floor((dayMid2 + lb.t) / tfSec) * tfSec;
+    }
+    /* merge live-tick bars that arrived before backfill finished */
+    if(prevData && prevData.bars && prevData.bars.length > 0 && normalised.length > 0){
+      var lastHistT = normalised[normalised.length-1].t;
+      prevData.bars.forEach(function(lb2){
+        if(lb2.t > lastHistT){ normalised.push(lb2); }
+      });
+      normalised.sort(function(a,b){ return a.t - b.t; });
+    }
+    allData[idx] = { pair: pair, color: COLORS[idx], bars: normalised,
+                     _rawOpen: normalised._rawOpen || (prevData && prevData._rawOpen) || null };
+    delete chunkProgress[idx];
+
+  loadedCount++;
+  if(tfSec >= 60){
+    setProgress(loadedCount, totalCount);
+  } else {
+    renderTickProgress();
+  }
+  setOverlay(loadedCount < totalCount
+    ? 'Fetching candle data… (' + loadedCount + '/' + totalCount + ')'
+    : null);
+  ulog((fromCache?'CACHE ':'NET ')+pair+' done — '+normalised.length+' bars ('+loadedCount+'/'+totalCount+')',
+         fromCache ? 'log-ok' : 'log-info');
+    if(loadedCount >= totalCount){
+      setLiveStatus('live','Live');
+      clearTickProgress();
+      document.getElementById('btn-apply').disabled = false;
+      ulog('All pairs backfilled. Live ticks already running.', 'log-ok');
+          }
+    updateStats();
+    draw();
+  }
 
 function buildQueue(){
   reqQueue = [];
@@ -390,7 +688,7 @@ function buildQueue(){
     reqQueue.push({ pair: pair, symbol: DERIV_SYMBOL[pair] });
   });
   loadedCount = 0;
-  // Pre-fill allData with nulls so indices are stable
+  chunkProgress = {};
   allData = PAIRS.map(function(p, i){ return { pair:p, color:COLORS[i], bars:[] }; });
 }
 
@@ -417,48 +715,19 @@ function buildOHLCFromTicks(ticks, bucketSec){
   return bars;
 }
 
-function fetchNext(){
-  if(!reqQueue.length){ activeReq = null; return; }
-  activeReq = reqQueue.shift();
-
-  var now           = Math.floor(Date.now()/1000);
-  var todayMidnight = now - (now % 86400);
-  var todayStart    = todayMidnight + SESSION_START;
-  var todayEnd      = todayMidnight + SESSION_END;
-
-  var startEpoch, endEpoch;
-  if(now < todayStart){
-    var yestMidnight = todayMidnight - 86400;
-    startEpoch = yestMidnight + SESSION_START;
-    endEpoch   = yestMidnight + SESSION_END;
-  } else {
-    startEpoch = todayStart;
-    endEpoch   = Math.min(now, todayEnd);
+/* ── OPEN ALL WORKERS ────────────────────────────────────── */
+function openWS(){
+  setLiveStatus('connecting','Connecting…');
+  setOverlay('Fetching candle data… (0/' + totalCount + ')');
+  setProgress(0, totalCount);
+  workers = [];
+  for(var wi = 0; wi < NUM_WORKERS; wi++){
+    createWorker(wi);
   }
-
-  var rid = getReqId();
-  if(tfSec < 60){
-    // Activate chunked tick fetching
-    activeReq._tickChunks = [];
-    activeReq._chunkStart = startEpoch;
-    activeReq._chunkEnd   = endEpoch;
-    activeReq._chunking   = true;
-    fetchNextTickChunk();
-  } else {
-    ws.send(JSON.stringify({
-      ticks_history: activeReq.symbol,
-      style: 'candles',
-      granularity: tfSec,
-      start: startEpoch,
-      end: endEpoch,
-      req_id: rid
-    }));
-  }
-}
-
-function advanceQueue(){
-  // Small delay to avoid rate-limit
-  setTimeout(fetchNext, 120);
+  /* start live ticks immediately — backfill runs in parallel */
+  liveSubQueue = [];
+  PAIRS.forEach(function(p){ liveSubQueue.push(DERIV_SYMBOL[p]); });
+  startLiveTicks();
 }
 
 /* ── RELOAD on TF change ─────────────────────────────────── */
@@ -471,11 +740,12 @@ function reloadAllData(){
   setProgress(0, totalCount);
   setOverlay('Fetching candle data… (0/' + totalCount + ')');
   buildQueue();
-  // re-use existing ws if open
-  if(ws && ws.readyState === WebSocket.OPEN){
-    fetchNext();
-  } else {
-    openWS();
+  // close old workers and live WS, then reopen
+    if(liveWS){ try{ liveWS.close(); }catch(e){} liveWS = null; }
+    workers.forEach(function(w){ try{ w.ws.close(); }catch(e){} });
+    workers = [];
+  for(var wi = 0; wi < NUM_WORKERS; wi++){
+    createWorker(wi);
   }
   updateStats();
   draw();
@@ -724,7 +994,7 @@ function updateStats(){
     '<div class="stat">TF <b>'+tfSec+'s</b></div>'+
     '<div class="stat">Bars <b>'+nBars+'</b></div>'+
     '<div class="stat">Pairs loaded <b>'+loadedCount+'/'+totalCount+'</b></div>'+
-    '<div class="stat">Session <b>12h</b></div>';
+    '<div class="stat">Session <b>24h</b></div>';
 }
 
 /* ── CANVAS EVENTS ───────────────────────────────────────── */
@@ -813,23 +1083,101 @@ function applyTF(){
 var ro = new ResizeObserver(function(){ resize(); });
 ro.observe(wrap);
 
+/* ── LIVE TICK SUBSCRIPTIONS ─────────────────────────────── */
+var liveWS         = null;
+var liveSubQueue   = [];
+var liveSubActive  = false;
+
+function startLiveTicks(){
+  if(liveWS && (liveWS.readyState === WebSocket.OPEN || liveWS.readyState === WebSocket.CONNECTING)){ return; }
+  ulog('Opening live tick WS…', 'log-info');
+  liveWS = new WebSocket(DERIV_WS_URL);
+  liveWS.onopen = function(){
+    ulog('Live WS connected — subscribing '+liveSubQueue.length+' pairs', 'log-ok');
+    liveSubActive = false;
+    subscribeLiveNext();
+  };
+  liveWS.onmessage = function(evt){
+    var msg = JSON.parse(evt.data);
+    if(msg.msg_type === 'tick'){
+          ulog('TICK '+msg.tick.symbol+' '+msg.tick.quote+' @'+msg.tick.epoch, 'log-tick');
+      var sym  = msg.tick.symbol;
+      var pair = null;
+      for(var p in DERIV_SYMBOL){ if(DERIV_SYMBOL[p] === sym){ pair = p; break; } }
+      if(!pair) return;
+      var idx  = PAIRS.indexOf(pair);
+      if(idx < 0 || !allData[idx]) return;
+      var ep   = +msg.tick.epoch;
+      var tLoc = ep % 86400;
+      var qt   = +msg.tick.quote;
+      var bars = allData[idx].bars;
+      var base = bars.length > 0 ? bars[0]._rawOpen : qt;
+      // store raw open on first bar for normalisation reference
+      if(!allData[idx]._rawOpen) allData[idx]._rawOpen = qt;
+      var bk   = Math.floor(ep / tfSec) * tfSec;
+      var bkLoc= bk % 86400;
+      var last = bars.length > 0 ? bars[bars.length-1] : null;
+      // get stored raw open for normalisation
+      var rawOpen = allData[idx]._rawOpen || qt;
+      if(!last || last._bk !== bk){
+              var pctNew = function(v){ return (v/rawOpen - 1)*100; };
+              bars.push({ t: bkLoc, _bk: bk,
+                o: pctNew(qt), h: pctNew(qt), l: pctNew(qt), c: pctNew(qt),
+                _rawH: qt, _rawL: qt, _rawC: qt });
+            } else {
+              var pctUpd = function(v){ return (v/rawOpen - 1)*100; };
+              if(last._rawH === undefined || qt > last._rawH){ last._rawH = qt; last.h = pctUpd(qt); }
+              if(last._rawL === undefined || qt < last._rawL){ last._rawL = qt; last.l = pctUpd(qt); }
+              last.c     = pctUpd(qt);
+              last._rawC = qt;
+            }
+      draw();
+    }
+    if(msg.msg_type === 'history' && msg.subscription){
+          ulog('Subscribed live: '+msg.echo_req.ticks, 'log-ok');
+          liveSubActive = false;
+          setTimeout(subscribeLiveNext, 80);
+        }
+        if(msg.error){
+          ulog('Live WS ERR: '+msg.error.message, 'log-err');
+          liveSubActive = false;
+          setTimeout(subscribeLiveNext, 500);
+        }
+      };
+      liveWS.onclose = function(){
+        ulog('Live WS closed — reconnecting in 2s', 'log-warn');
+        if(loadedCount >= totalCount){
+          setTimeout(startLiveTicks, 2000);
+        }
+      };
+    }
+
+function subscribeLiveNext(){
+  if(liveSubActive) return;
+  if(!liveSubQueue.length) return;
+  var sym = liveSubQueue.shift();
+  liveSubActive = true;
+  liveWS.send(JSON.stringify({
+    ticks: sym,
+    subscribe: 1,
+    req_id: getReqId()
+  }));
+}
+
 /* ── SESSION RESET TIMER ─────────────────────────────────── */
 function scheduleSessionReset(){
   var now           = Math.floor(Date.now()/1000);
-  var todayMidnight = now - (now % 86400);
-  var todayStart    = todayMidnight + SESSION_START;
-  var msUntilStart  = (todayStart - now) * 1000;
-  if(msUntilStart > 0){
-    setTimeout(function(){
-      // Today's session just opened — reload with live data
-      zoomS = 0; zoomE = SESSION_RANGE;
-      reloadAllData();
-      scheduleSessionReset();
-    }, msUntilStart + 500);
-  }
+  var tomorrowMidnight = (now - (now % 86400)) + 86400;
+  var msUntil = (tomorrowMidnight - now) * 1000;
+  setTimeout(function(){
+    zoomS = 0; zoomE = SESSION_RANGE;
+    reloadAllData();
+    scheduleSessionReset();
+  }, msUntil + 500);
 }
 
 /* ── INIT ────────────────────────────────────────────────── */
+ulog('App init — tfSec='+tfSec+' pairs='+PAIRS.length, 'log-info');
 updateStats();
 resize();
 buildQueue();
