@@ -52,7 +52,7 @@
   #live-dot.connecting{background:#f59e0b;animation:pulse 1s infinite;}
   #live-dot.live{background:var(--green);animation:pulse 1.5s infinite;}
   #live-dot.error{background:var(--red);}
-  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.35;}}</p>
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.35;}}
 
   #progress-wrap{
     height:2px;background:var(--border);position:relative;overflow:hidden;flex-shrink:0;
@@ -139,7 +139,7 @@
     </div>
     <div class="tf-group">
       <label>Timeframe (sec):</label>
-      <input id="tf-input" class="tf-input" type="number" value="300" min="60"/>
+      <input id="tf-input" class="tf-input" type="number" value="300" min="10"/>
       <button class="btn-apply" id="btn-apply" disabled>Apply</button>
     </div>
   </header>
@@ -251,56 +251,94 @@ function setOverlay(msg){
   el.textContent = msg;
 }
 
+var TICK_CHUNK_SIZE = 3500;
+
+function fetchNextTickChunk(){
+  var rid = getReqId();
+  reqIdMap[rid] = activeReq.pair;
+  ws.send(JSON.stringify({
+    ticks_history: activeReq.symbol,
+    style: 'ticks',
+    start: activeReq._chunkStart,
+    end: activeReq._chunkEnd,
+    count: TICK_CHUNK_SIZE,
+    req_id: rid
+  }));
+}
+
 /* ── WEBSOCKET ───────────────────────────────────────────── */
 function openWS(){
   setLiveStatus('connecting','Connecting…');
   ws = new WebSocket(DERIV_WS_URL);
 
   ws.onopen = function(){
-    // Authorise first
-    ws.send(JSON.stringify({ authorize: DERIV_API_TOKEN, req_id: getReqId() }));
+    // Skip authorize — ticks_history is public, no token needed
+    setLiveStatus('connecting','Fetching data…');
+    setOverlay('Fetching candle data… (0/' + totalCount + ')');
+    setProgress(0, totalCount);
+    fetchNext();
   };
 
   ws.onmessage = function(evt){
-    var msg = JSON.parse(evt.data);
-
-    if(msg.msg_type === 'authorize'){
-      if(msg.error){
-        setLiveStatus('error','Auth failed');
-        setOverlay('Authorisation failed: ' + msg.error.message);
-        return;
+      var msg = JSON.parse(evt.data);
+  
+      if(msg.msg_type === 'history' || msg.msg_type === 'candles'){
+        if(msg.error){
+          console.warn('data error:', msg.error.message, activeReq);
+          advanceQueue();
+          return;
+        }
+        var pair = activeReq ? activeReq.pair : null;
+        if(!pair){ advanceQueue(); return; }
+  
+        /* ── CHUNKED TICK PATH ── */
+        if(activeReq._chunking && msg.msg_type === 'history'){
+          var epochs = (msg.history && msg.history.times)  || [];
+          var prices = (msg.history && msg.history.prices) || [];
+          var chunk  = [];
+          for(var ti = 0; ti < epochs.length; ti++){
+            chunk.push({ epoch: +epochs[ti], quote: +prices[ti] });
+          }
+          // Prepend: API returns newest-first when using count, so reverse
+          chunk.reverse();
+          activeReq._tickChunks = chunk.concat(activeReq._tickChunks);
+  
+          var gotCount = epochs.length;
+          var oldestEpoch = chunk.length ? chunk[0].epoch : activeReq._chunkStart;
+  
+          // If we got a full chunk and haven't reached the session start, fetch earlier
+          if(gotCount >= TICK_CHUNK_SIZE && oldestEpoch > activeReq._chunkStart + 5){
+            activeReq._chunkEnd = oldestEpoch - 1;
+            setTimeout(fetchNextTickChunk, 120);
+            return;  // keep activeReq, keep waiting
+          }
+  
+          // Done chunking — build OHLC from all accumulated ticks
+          var allTicks = activeReq._tickChunks;
+          allTicks.sort(function(a,b){ return a.epoch - b.epoch; });
+          var candles = buildOHLCFromTicks(allTicks, tfSec);
+          finaliseCandles(pair, candles);
+          return;
+        }
+  
+        /* ── STANDARD CANDLE PATH ── */
+        var candles = msg.candles || [];
+        finaliseCandles(pair, candles);
       }
-      setLiveStatus('connecting','Fetching data…');
-      setOverlay('Fetching candle data… (0/' + totalCount + ')');
-      setProgress(0, totalCount);
-      fetchNext();
-      return;
-    }
-
-    if(msg.msg_type === 'candles'){
-      if(msg.error){
-        // skip this pair, move on
-        console.warn('candles error:', msg.error.message, activeReq);
-        advanceQueue();
-        return;
-      }
-      var pair = activeReq ? activeReq.pair : null;
-      if(!pair){ advanceQueue(); return; }
-
-      var candles = msg.candles || [];
-      // Filter to session window and normalise
+    };
+  
+    function finaliseCandles(pair, candles){
+      // Filter to session window
       var sessionBars = [];
       candles.forEach(function(c){
-        var tLocal = c.epoch % 86400; // seconds into UTC day
+        var tLocal = c.epoch % 86400;
         if(tLocal >= SESSION_START && tLocal < SESSION_END){
           sessionBars.push({ t: tLocal, o: +c.open, h: +c.high, l: +c.low, c: +c.close });
         }
       });
-
-      // Sort by time
+  
       sessionBars.sort(function(a,b){ return a.t - b.t; });
-
-      // Normalise to % from first open
+  
       var normalised = [];
       if(sessionBars.length > 0){
         var base = sessionBars[0].o;
@@ -316,10 +354,10 @@ function openWS(){
           });
         }
       }
-
+  
       var idx = PAIRS.indexOf(pair);
       allData[idx] = { pair: pair, color: COLORS[idx], bars: normalised };
-
+  
       loadedCount++;
       setProgress(loadedCount, totalCount);
       setOverlay(loadedCount < totalCount
@@ -333,7 +371,6 @@ function openWS(){
       draw();
       advanceQueue();
     }
-  };
 
   ws.onerror = function(){
     setLiveStatus('error','Connection error');
@@ -357,29 +394,66 @@ function buildQueue(){
   allData = PAIRS.map(function(p, i){ return { pair:p, color:COLORS[i], bars:[] }; });
 }
 
+function buildOHLCFromTicks(ticks, bucketSec){
+  if(!ticks.length) return [];
+  var bars = [];
+  var bucketStart = Math.floor(ticks[0].epoch / bucketSec) * bucketSec;
+  var o = +ticks[0].quote, h = o, l = o, c = o;
+  for(var i = 0; i < ticks.length; i++){
+    var tk = ticks[i];
+    var bk = Math.floor(tk.epoch / bucketSec) * bucketSec;
+    if(bk !== bucketStart){
+      bars.push({ epoch: bucketStart, open: o, high: h, low: l, close: c });
+      bucketStart = bk;
+      o = +tk.quote; h = o; l = o; c = o;
+    } else {
+      var q = +tk.quote;
+      if(q > h) h = q;
+      if(q < l) l = q;
+      c = q;
+    }
+  }
+  bars.push({ epoch: bucketStart, open: o, high: h, low: l, close: c });
+  return bars;
+}
+
 function fetchNext(){
   if(!reqQueue.length){ activeReq = null; return; }
   activeReq = reqQueue.shift();
 
-  // Deriv ticks_history for today's session
-  // count = SESSION_RANGE / tfSec rounded up + buffer
-  var count = Math.ceil(SESSION_RANGE / tfSec) + 5;
-  // Use today's date at SESSION_END as end time
-  var now   = Math.floor(Date.now()/1000);
-  // Calculate today's session end epoch (UTC)
+  var now           = Math.floor(Date.now()/1000);
   var todayMidnight = now - (now % 86400);
-  var endEpoch = todayMidnight + SESSION_END;
-  if(endEpoch > now) endEpoch = now; // don't ask future
+  var todayStart    = todayMidnight + SESSION_START;
+  var todayEnd      = todayMidnight + SESSION_END;
+
+  var startEpoch, endEpoch;
+  if(now < todayStart){
+    var yestMidnight = todayMidnight - 86400;
+    startEpoch = yestMidnight + SESSION_START;
+    endEpoch   = yestMidnight + SESSION_END;
+  } else {
+    startEpoch = todayStart;
+    endEpoch   = Math.min(now, todayEnd);
+  }
 
   var rid = getReqId();
-  ws.send(JSON.stringify({
-    ticks_history: activeReq.symbol,
-    style: 'candles',
-    granularity: tfSec,
-    count: count,
-    end: 'latest',
-    req_id: rid
-  }));
+  if(tfSec < 60){
+    // Activate chunked tick fetching
+    activeReq._tickChunks = [];
+    activeReq._chunkStart = startEpoch;
+    activeReq._chunkEnd   = endEpoch;
+    activeReq._chunking   = true;
+    fetchNextTickChunk();
+  } else {
+    ws.send(JSON.stringify({
+      ticks_history: activeReq.symbol,
+      style: 'candles',
+      granularity: tfSec,
+      start: startEpoch,
+      end: endEpoch,
+      req_id: rid
+    }));
+  }
 }
 
 function advanceQueue(){
@@ -728,7 +802,7 @@ document.getElementById('tf-input').addEventListener('keydown', function(e){
 
 function applyTF(){
   var v = parseInt(document.getElementById('tf-input').value) || 300;
-  if(v < 60 || v > SESSION_RANGE) return;
+  if(v < 1 || v > SESSION_RANGE) return;
   tfSec  = v;
   zoomS  = 0;
   zoomE  = SESSION_RANGE;
@@ -739,11 +813,28 @@ function applyTF(){
 var ro = new ResizeObserver(function(){ resize(); });
 ro.observe(wrap);
 
+/* ── SESSION RESET TIMER ─────────────────────────────────── */
+function scheduleSessionReset(){
+  var now           = Math.floor(Date.now()/1000);
+  var todayMidnight = now - (now % 86400);
+  var todayStart    = todayMidnight + SESSION_START;
+  var msUntilStart  = (todayStart - now) * 1000;
+  if(msUntilStart > 0){
+    setTimeout(function(){
+      // Today's session just opened — reload with live data
+      zoomS = 0; zoomE = SESSION_RANGE;
+      reloadAllData();
+      scheduleSessionReset();
+    }, msUntilStart + 500);
+  }
+}
+
 /* ── INIT ────────────────────────────────────────────────── */
 updateStats();
 resize();
 buildQueue();
 openWS();
+scheduleSessionReset();
 </script>
 </body>
 </html>
